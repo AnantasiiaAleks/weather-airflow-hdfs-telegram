@@ -1,0 +1,14 @@
+.env
+__pycache__
+logs/
+*.pyc
+*.pyo
+*.db
+*.log
+*.parquet
+*.png
+*.DS_Store
+.idea/
+*.json
+current/
+*.lock

@@ -1,0 +1,163 @@
+# version: '3.8'
+
+x-common-volumes: &common-volumes
+  - ./dags:/opt/airflow/dags
+  - ./logs:/opt/airflow/logs
+  - ./hdfs-data/namenode:/hadoop/dfs/name
+  - ./hdfs-data/datanode:/hadoop/dfs/data
+  - ./data:/data
+  - ./telegram-bot:/app
+  - ./requirements.txt:/requirements.txt
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.3-python3.10
+  environment:
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'True'
+    AIRFLOW_CONN_WEATHER_API: 'http://api.weatherapi.com/v1/history.json?key=YOUR_API_KEY&q='
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@host.docker.internal:5432/airflow
+  volumes:
+    *common-volumes
+  user: "${AIRFLOW_UID:-50000}:0"
+  networks:
+    - airflow-network
+
+services:
+  # === PostgreSQL как метадатабаза для Airflow ===
+  postgres:
+    image: postgres:15
+    container_name: weather-plots-postgres-1
+    hostname: postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # network:
+    #   - airflow-network
+
+  # === Redis как брокер задач для Airflow ===
+  redis:
+    image: redis:latest
+    container_name: weather-plots-redis-1
+    hostname: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - airflow-network
+
+  # === Airflow Webserver ===
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: weather-plots-airflow-webserver-1
+    ports:
+      - "8080:8080"
+    command:
+      - bash
+      - -c
+      - |
+        pip install --no-cache-dir -r /requirements.txt && \
+        airflow db init && \
+        airflow db upgrade && \
+        airflow webserver
+    depends_on:
+      - postgres
+      - redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # === Airflow Scheduler ===
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: weather-plots-airflow-scheduler-1
+    command:
+      - bash
+      - -c
+      - |
+        pip install --no-cache-dir -r /requirements.txt && \
+        airflow scheduler
+    depends_on:
+      - airflow-webserver
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # === Airflow Worker ===
+  airflow-worker:
+    <<: *airflow-common
+    container_name: weather-plots-airflow-worker-1
+    command:
+      - bash
+      - -c
+      - |
+        pip install --no-cache-dir -r /requirements.txt && \
+        airflow celery worker
+    depends_on:
+      - airflow-webserver
+      - redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - airflow-network
+
+  # === HDFS NameNode ===
+  namenode:
+    image: fjardim/namenode_sqoop
+    container_name: namenode
+    hostname: namenode
+    ports:
+      - "50070:50070"  # Web UI
+      - "9000:9000"    # RPC
+    environment:
+      - HOSTNAME_AS_localhost=true
+    volumes:
+      - ./hdfs-data/namenode:/hadoop/dfs/name
+    networks:
+      - airflow-network
+
+  # === HDFS DataNode ===
+  datanode:
+    image: fjardim/datanode
+    container_name: datanode
+    hostname: datanode
+    ports:
+      - "50075:50075"  # Datanode UI
+    entrypoint: ["hdfs", "datanode"]
+    depends_on:
+      - namenode
+    environment:
+      - HOSTNAME_AS_localhost=true
+    volumes:
+      - ./hdfs-data/datanode:/hadoop/dfs/data
+    networks:
+      - airflow-network
+
+  # === Telegram Бот ===
+  weather-telegram-bot:
+    image: python:3.10-slim
+    container_name: weather-telegram-bot
+    working_dir: /app
+    volumes:
+      - ./telegram-bot:/app
+      - ./requirements.txt:/requirements.txt
+    command:
+      - bash
+      - -c
+      - |
+        pip install --no-cache-dir -r /requirements.txt && \
+        python /app/bot.py
+    networks:
+      - airflow-network
+    env_file:
+      - .env
+
+networks:
+  airflow-network:
+    name: airflow-network
+    driver: bridge
+
+volumes:
+  postgres_data:
